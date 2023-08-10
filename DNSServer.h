@@ -3,6 +3,9 @@
 //
 #ifndef DNSSERVER_H
 #define DNSSERVER_H
+#include <unistd.h>
+#include <stdlib.h>
+#include <stdint.h>
 
 typedef struct DNSServer DNSServer;
 typedef struct WorkerArgs WorkerArgs;

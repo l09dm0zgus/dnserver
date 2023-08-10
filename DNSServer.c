@@ -7,28 +7,32 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
-#include <unistd.h>
-#include <stdlib.h>
 #include <stdio.h>
 #include <glob.h>
 #include <assert.h>
-
 
 typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
 
-#define PORT 53
-#define BUFFER_SIZE 512
+enum
+{
+    SIZE_OF_DOMAIN_TYPE = 2,
+    DOMAIN_START = 12,
+    PORT = 53,
+    SIZE_OF_DOMAIN_TOP_LEVEL = 128,
+    SIZE_OF_DOMAIN_SECOND_LEVEL = 256,
+    BUFFER_SIZE = 512,
+};
 
 
 
 typedef struct
 {
-    u8 topLevel[128];
-    u8 secondLevel[256];
-    u8 type[2];
+    u8 topLevel[SIZE_OF_DOMAIN_TOP_LEVEL];
+    u8 secondLevel[SIZE_OF_DOMAIN_SECOND_LEVEL];
+    u8 type[SIZE_OF_DOMAIN_TYPE];
 }DomainName;
 
 
@@ -101,7 +105,7 @@ DomainName getQuestionDomain(const u8* data,int readedBytes)
 
     memcpy(domainName.secondLevel,data + 1,secondLevelLength);
     memcpy(domainName.topLevel,data + secondLevelLength + 1 ,topLevelLength + 1);
-    memcpy(domainName.type,data + 1 + topLevelLength + secondLevelLength + 2  ,2);
+    memcpy(domainName.type,data + 1 + topLevelLength + secondLevelLength + 2  ,SIZE_OF_DOMAIN_TYPE);
 
     printf("%s.%s Type: %X , %X\n",domainName.secondLevel,domainName.topLevel,domainName.type[0],domainName.type[1]);
 
@@ -111,13 +115,16 @@ DomainName getQuestionDomain(const u8* data,int readedBytes)
 static DNSHeader buildResponse(const u8* data,int readedBytes)
 {
     DNSHeader header;
-    char transactionID[2];
+
+    u8 transactionID[2];
     transactionID[0] = data[0];
     transactionID[1] = data[1];
+
     header.id = (transactionID[1] << 8) + transactionID[0];
+
     header.qcount = 1;
 
-    getQuestionDomain(data+12,readedBytes);
+    getQuestionDomain(data + DOMAIN_START,readedBytes);
 
     return header;
 
