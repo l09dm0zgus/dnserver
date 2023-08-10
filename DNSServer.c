@@ -14,9 +14,78 @@
 #define PORT 53
 #define BUFFER_SIZE 512
 
-void worker(void *arg)
+typedef struct
 {
+    uint16_t id;
+    uint16_t qr:1;
+	uint16_t opcode:4;
+	uint16_t aa:1;
+	uint16_t tc:1;
+	uint16_t rd:1;
+	uint16_t ra:1;
+	uint16_t zero:3;
+	uint16_t rcode:4;
+    uint16_t qcount;	/* question count */
+    uint16_t ancount;	/* Answer record count */
+    uint16_t nscount;	/* Name Server (Autority Record) Count */
+    uint16_t adcount;	/* Additional Record Count */
+} DNSHeader;
+
+struct WorkerArgs
+{
+    int socketDescriptor;
+    int readedBytes;
+    uint8_t buffer[BUFFER_SIZE];
+    struct sockaddr* clientAddress;
+    int clientStructLength;
+};
+
+static void setFlags(const char* data,DNSHeader *header)
+{
+    char byte1 = data[2];
+    char byte2 = data[3];
+    header->qr = 0b1;
+    for(u_int8_t i = 1; i <= 5;i++)
+    {
+        header->opcode += byte1 & (1<<i);
+    }
+    header->aa = 0b1;
+    header->tc = 0b0;
+    header->rd = 0b0;
+    header->ra = 0b0;
+    header->zero = 0b000;
+    header->rcode = 0b0000;
+
+}
+
+void getQuestionDomain(const uint8_t * data,int readedBytes)
+{
+    for(int i = 0;i < readedBytes;i++)
+    {
+        printf("%c",data[i]);
+    }
+}
+
+static DNSHeader buildResponse(const uint8_t* data,int readedBytes)
+{
+    DNSHeader header;
+    char transactionID[2];
+    transactionID[0] = data[0];
+    transactionID[1] = data[1];
+    header.id = (transactionID[1] << 8) + transactionID[0];
+    header.qcount = 1;
+
+    getQuestionDomain(data + 12,readedBytes);
+
+    return header;
+
+}
+
+ void worker(void *arg)
+{
+    WorkerArgs  *workerArgs = (WorkerArgs*)arg;
     printf("Send to client\n");
+    buildResponse(workerArgs->buffer,workerArgs->readedBytes);
     // Respond to client:
     //strcpy(server_message, client_message);
 
@@ -33,8 +102,8 @@ struct DNSServer
     ThreadPool *pool;
     struct sockaddr_in address;
     int port;
-    char serverMessage[BUFFER_SIZE];
-    char clientMessage[BUFFER_SIZE];
+    uint8_t serverMessage[BUFFER_SIZE];
+    uint8_t clientMessage[BUFFER_SIZE];
 };
 
 DNSServer *createDNSServer(const char *ip,int port,int readTimeout)
@@ -107,7 +176,7 @@ _Noreturn void serve(DNSServer* server)
         while (1)
         {
             int readedBytes = 0;
-            readedBytes = recvfrom(server->socketDescriptor, server->clientMessage, sizeof(server->clientMessage), 0, (struct sockaddr*)&clientAddress, &clientStructLength);
+            readedBytes = recvfrom(server->socketDescriptor, server->clientMessage, BUFFER_SIZE , 0, (struct sockaddr*)&clientAddress, &clientStructLength);
             if(readedBytes > 0)
             {
                 printf("Received message from IP: %s and port: %i\n", inet_ntoa(clientAddress.sin_addr), ntohs(clientAddress.sin_port));
@@ -115,7 +184,17 @@ _Noreturn void serve(DNSServer* server)
                 printf("Msg from client: %s\n", server->clientMessage);
                 if(server->pool != NULL)
                 {
-                    addWork(server->pool,worker,NULL);
+                    WorkerArgs args;
+                    args.socketDescriptor = server->socketDescriptor;
+                    args.clientAddress = (struct sockaddr*)&clientAddress;
+                    for(int i = 0;i < readedBytes;i++)
+                    {
+                        args.buffer[i] = server->clientMessage[i];
+                    }
+
+                    args.readedBytes = readedBytes;
+                    args.clientStructLength = clientStructLength;
+                    addWork(server->pool,worker,&args);
                 }
             }
 

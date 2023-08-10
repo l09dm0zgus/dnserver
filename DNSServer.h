@@ -5,6 +5,7 @@
 #define DNSSERVER_H
 
 typedef struct DNSServer DNSServer;
+typedef struct WorkerArgs WorkerArgs;
 
 DNSServer *createDNSServer(const char *ip,int port,int readTimeout);
 
