@@ -5,4 +5,6 @@ set(CMAKE_C_STANDARD 11)
 
 add_executable(DNSServer main.c
         ThreadPool.h
-        ThreadPool.c)
+        ThreadPool.c
+        DNSServer.h
+        DNSServer.c)
