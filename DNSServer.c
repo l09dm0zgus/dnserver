@@ -16,6 +16,12 @@
 
 typedef struct
 {
+    uint8_t topLevel[128];
+    uint8_t secondLevel[256];
+    uint8_t type[2];
+}DomainName;
+typedef struct
+{
     uint16_t id;
     uint16_t qr:1;
 	uint16_t opcode:4;
@@ -58,12 +64,20 @@ static void setFlags(const char* data,DNSHeader *header)
 
 }
 
-void getQuestionDomain(const uint8_t * data,int readedBytes)
+DomainName getQuestionDomain(const uint8_t* data,int readedBytes)
 {
-    for(int i = 0;i < readedBytes;i++)
-    {
-        printf("%c",data[i]);
-    }
+    DomainName domainName;
+
+    uint8_t secondLevelLength = data[0];
+    uint8_t topLevelLength = data[secondLevelLength + 1];
+
+    memcpy(domainName.secondLevel,data + 1,secondLevelLength);
+    memcpy(domainName.topLevel,data + secondLevelLength + 1 ,topLevelLength + 1);
+    memcpy(domainName.type,data + 1 + topLevelLength + secondLevelLength + 2  ,2);
+
+    printf("%s.%s Type: %X , %X\n",domainName.secondLevel,domainName.topLevel,domainName.type[0],domainName.type[1]);
+
+    return domainName;
 }
 
 static DNSHeader buildResponse(const uint8_t* data,int readedBytes)
@@ -75,7 +89,7 @@ static DNSHeader buildResponse(const uint8_t* data,int readedBytes)
     header.id = (transactionID[1] << 8) + transactionID[0];
     header.qcount = 1;
 
-    getQuestionDomain(data + 12,readedBytes);
+    getQuestionDomain(data+12,readedBytes);
 
     return header;
 
