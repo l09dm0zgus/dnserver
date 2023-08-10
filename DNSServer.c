@@ -10,38 +10,50 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <glob.h>
+#include <assert.h>
+
+
+typedef uint8_t u8;
+typedef uint16_t u16;
+typedef uint32_t u32;
+typedef uint64_t u64;
 
 #define PORT 53
 #define BUFFER_SIZE 512
 
+
+
 typedef struct
 {
-    uint8_t topLevel[128];
-    uint8_t secondLevel[256];
-    uint8_t type[2];
+    u8 topLevel[128];
+    u8 secondLevel[256];
+    u8 type[2];
 }DomainName;
+
+
 typedef struct
 {
-    uint16_t id;
-    uint16_t qr:1;
-	uint16_t opcode:4;
-	uint16_t aa:1;
-	uint16_t tc:1;
-	uint16_t rd:1;
-	uint16_t ra:1;
-	uint16_t zero:3;
-	uint16_t rcode:4;
-    uint16_t qcount;	/* question count */
-    uint16_t ancount;	/* Answer record count */
-    uint16_t nscount;	/* Name Server (Autority Record) Count */
-    uint16_t adcount;	/* Additional Record Count */
+    u16 id;
+    u16 qr:1;
+	u16 opcode:4;
+	u16 aa:1;
+	u16 tc:1;
+	u16 rd:1;
+	u16 ra:1;
+	u16 zero:3;
+	u16 rcode:4;
+    u16 qcount;	/* question count */
+    u16 ancount;	/* Answer record count */
+    u16 nscount;	/* Name Server (Autority Record) Count */
+    u16 adcount;	/* Additional Record Count */
 } DNSHeader;
 
 struct WorkerArgs
 {
     int socketDescriptor;
     int readedBytes;
-    uint8_t buffer[BUFFER_SIZE];
+    u8 buffer[BUFFER_SIZE];
     struct sockaddr* clientAddress;
     int clientStructLength;
 };
@@ -63,13 +75,29 @@ static void setFlags(const char* data,DNSHeader *header)
     header->rcode = 0b0000;
 
 }
+ static void loadZones()
+ {
+    glob_t globBuffer;
+    int result = glob("zones/*.zone",GLOB_ERR,NULL,&globBuffer);
+    if(result == GLOB_NOMATCH)
+    {
+        printf("File by given pattern not found!\n");
+    }
+    else if(result == GLOB_ABORTED)
+    {
+        printf("Failed to read!");
+    }
+    assert(result == 0);
 
-DomainName getQuestionDomain(const uint8_t* data,int readedBytes)
+
+ }
+
+DomainName getQuestionDomain(const u8* data,int readedBytes)
 {
     DomainName domainName;
 
-    uint8_t secondLevelLength = data[0];
-    uint8_t topLevelLength = data[secondLevelLength + 1];
+    u8 secondLevelLength = data[0];
+    u8 topLevelLength = data[secondLevelLength + 1];
 
     memcpy(domainName.secondLevel,data + 1,secondLevelLength);
     memcpy(domainName.topLevel,data + secondLevelLength + 1 ,topLevelLength + 1);
@@ -80,7 +108,7 @@ DomainName getQuestionDomain(const uint8_t* data,int readedBytes)
     return domainName;
 }
 
-static DNSHeader buildResponse(const uint8_t* data,int readedBytes)
+static DNSHeader buildResponse(const u8* data,int readedBytes)
 {
     DNSHeader header;
     char transactionID[2];
@@ -116,8 +144,8 @@ struct DNSServer
     ThreadPool *pool;
     struct sockaddr_in address;
     int port;
-    uint8_t serverMessage[BUFFER_SIZE];
-    uint8_t clientMessage[BUFFER_SIZE];
+    u8 serverMessage[BUFFER_SIZE];
+    u8 clientMessage[BUFFER_SIZE];
 };
 
 DNSServer *createDNSServer(const char *ip,int port,int readTimeout)
