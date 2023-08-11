@@ -69,12 +69,23 @@ typedef struct
     u8 type[SIZE_OF_DOMAIN_TYPE];
 }DNSQuery;
 
+typedef struct
+{
+    u8 compression[2];
+    u8 type[SIZE_OF_DOMAIN_TYPE];
+    u32 ttl;
+    u16 length;
+    u8 *data;
+}DNSBody;
 
 typedef struct
 {
     DNSHeader header;
     DNSQuery query;
+    DNSBody *body;
 }DNSResponse;
+
+
 struct WorkerArgs
 {
     int socketDescriptor;
@@ -90,12 +101,7 @@ void setFlags(const u8* data,DNSHeader *header)
     u8 byte2 = data[3];
 
     header->qr = 0b1;
-
-    for(u_int8_t i = 1; i <= 5;i++)
-    {
-        header->opcode += byte1 & (1<<i);
-    }
-
+    header->opcode = 0b0;
     header->aa = 0b1;
     header->tc = 0b0;
     header->rd = 0b0;
@@ -187,7 +193,6 @@ DNSHeader buildDNSHeader(const u8* data,DomainName *name)
 
     setFlags(data, &header);
 
-
     u8 bytes[2];
     bytes[0] = '\x00';
     bytes[1] = '\x01';
@@ -221,6 +226,55 @@ DNSHeader buildDNSHeader(const u8* data,DomainName *name)
     return header;
 }
 
+
+DNSBody *buildDNSBody(DomainName *name,DNSHeader *header)
+{
+    ZoneData zone = getZone(name);
+    DNSBody *body = (DNSBody*)malloc(sizeof(DNSBody) * header->ancount);
+
+    char *qt;
+    if (name->type[0] == '\x00' && name->type[1] == '\x01')
+    {
+        qt = "a";
+    }
+
+    json_object* object = json_object_object_get(zone.root,qt);
+    for (int i = 0; i < header->ancount; ++i)
+    {
+
+        body[i].compression[0] = '\xc0';
+        body[i].compression[1] = '\x0c';
+        memcpy(body[i].type,name->type,SIZE_OF_DOMAIN_TYPE);
+
+
+        json_object* arrayElement = json_object_array_get_idx(object, i);
+
+        json_object* ttlObject = json_object_object_get(arrayElement,"ttl");
+        body[i].ttl = json_object_get_int(ttlObject);
+
+        json_object* addressObject = json_object_object_get(arrayElement,"value");
+        const char* address = json_object_get_string(addressObject);
+
+        if(strcmp(qt,"a") == 0)
+        {
+            body[i].length = 4;
+        }
+
+        body[i].data = (u8*) malloc(sizeof(u8) * body[i].length);
+
+        char *token = strtok((char*)address, ".");
+        int j = 0;
+        while(token != NULL )
+        {
+            body[i].data[j] = (u8)atoi(token);
+            j++;
+            token = strtok(NULL, ".");
+        }
+    }
+
+    return body;
+}
+
 DNSQuery buildDNSQuery(DomainName *name)
 {
     DNSQuery query;
@@ -243,6 +297,7 @@ DNSResponse buildResponse(const u8* data,int readedBytes)
 
     response.header = buildDNSHeader(data,&name);
     response.query = buildDNSQuery(&name);
+    response.body = buildDNSBody(&name,&response.header);
 
     return response;
 }
@@ -257,6 +312,12 @@ DNSResponse buildResponse(const u8* data,int readedBytes)
     {
         printf("Can't send!The last error message is: %s\n", strerror(errno));
     }
+    for(int i = 0 ;i < response.header.ancount;i++)
+    {
+        free(response.body[i].data);
+    }
+
+    free(response.body);
 }
 
 struct DNSServer
