@@ -60,6 +60,21 @@ typedef struct
     u16 adcount;	/* Additional Record Count */
 } DNSHeader;
 
+typedef struct
+{
+    u8 size1;
+    u8 *name1;
+    u8 size2;
+    u8 *name2;
+    u8 type[SIZE_OF_DOMAIN_TYPE];
+}DNSQuery;
+
+
+typedef struct
+{
+    DNSHeader header;
+    DNSQuery query;
+}DNSResponse;
 struct WorkerArgs
 {
     int socketDescriptor;
@@ -162,10 +177,9 @@ DomainName getQuestionDomain(const u8* data,int readedBytes)
     return domainName;
 }
 
-DNSHeader buildResponse(const u8* data,int readedBytes)
+DNSHeader buildDNSHeader(const u8* data,DomainName *name)
 {
     DNSHeader header;
-
     u8 transactionID[2];
     transactionID[0] = data[0];
     transactionID[1] = data[1];
@@ -180,14 +194,13 @@ DNSHeader buildResponse(const u8* data,int readedBytes)
     header.qcount = (bytes[1] << 8) + bytes[0];;
 
     char *qt;
-    DomainName name = getQuestionDomain(data + DOMAIN_START,readedBytes);
 
-    if(name.type[0] == '\x00' && name.type[1] == '\x01')
+    if(name->type[0] == '\x00' && name->type[1] == '\x01')
     {
         qt = "a";
     }
 
-    ZoneData zone = getZone(&name);
+    ZoneData zone = getZone(name);
 
     if(zone.root != NULL)
     {
@@ -206,16 +219,41 @@ DNSHeader buildResponse(const u8* data,int readedBytes)
     header.adcount = 0;
 
     return header;
+}
 
+DNSQuery buildDNSQuery(DomainName *name)
+{
+    DNSQuery query;
+    memcpy(query.type , name->type,SIZE_OF_DOMAIN_TYPE);
+    query.size1 = strlen((const char*)name->topLevel);
+    query.size2 = strlen((const char*)name->secondLevel);
+
+    query.name1 = name->topLevel;
+    query.name2 = name->secondLevel;
+
+    return query;
+
+}
+
+DNSResponse buildResponse(const u8* data,int readedBytes)
+{
+    DNSResponse response;
+
+    DomainName name = getQuestionDomain(data + DOMAIN_START,readedBytes);
+
+    response.header = buildDNSHeader(data,&name);
+    response.query = buildDNSQuery(&name);
+
+    return response;
 }
 
  void worker(void *arg)
 {
     WorkerArgs  *workerArgs = (WorkerArgs*)arg;
     printf("Send to client\n");
-    DNSHeader header = buildResponse(workerArgs->buffer,workerArgs->readedBytes);
+    DNSResponse response = buildResponse(workerArgs->buffer,workerArgs->readedBytes);
 
-    if (sendto(workerArgs->socketDescriptor, &header, sizeof(DNSHeader), 0,workerArgs->clientAddress, workerArgs->clientStructLength) < 0)
+    if (sendto(workerArgs->socketDescriptor, &response, sizeof(DNSResponse), 0,workerArgs->clientAddress, workerArgs->clientStructLength) < 0)
     {
         printf("Can't send!The last error message is: %s\n", strerror(errno));
     }
