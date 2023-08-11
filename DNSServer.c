@@ -10,6 +10,8 @@
 #include <stdio.h>
 #include <glob.h>
 #include <assert.h>
+#include <json.h>
+#include <errno.h>
 
 typedef uint8_t u8;
 typedef uint16_t u16;
@@ -35,6 +37,11 @@ typedef struct
     u8 type[SIZE_OF_DOMAIN_TYPE];
 }DomainName;
 
+typedef struct
+{
+    char *name;
+    json_object *root;
+}ZoneData;
 
 typedef struct
 {
@@ -62,15 +69,18 @@ struct WorkerArgs
     int clientStructLength;
 };
 
-static void setFlags(const char* data,DNSHeader *header)
+void setFlags(const u8* data,DNSHeader *header)
 {
-    char byte1 = data[2];
-    char byte2 = data[3];
+    u8 byte1 = data[2];
+    u8 byte2 = data[3];
+
     header->qr = 0b1;
+
     for(u_int8_t i = 1; i <= 5;i++)
     {
         header->opcode += byte1 & (1<<i);
     }
+
     header->aa = 0b1;
     header->tc = 0b0;
     header->rd = 0b0;
@@ -79,7 +89,7 @@ static void setFlags(const char* data,DNSHeader *header)
     header->rcode = 0b0000;
 
 }
- static void loadZones()
+ZoneData *loadZones(int *size)
  {
     glob_t globBuffer;
     int result = glob("zones/*.zone",GLOB_ERR,NULL,&globBuffer);
@@ -90,9 +100,49 @@ static void setFlags(const char* data,DNSHeader *header)
     else if(result == GLOB_ABORTED)
     {
         printf("Failed to read!");
+        assert(result == 0);
     }
-    assert(result == 0);
 
+    ZoneData *data = (ZoneData*)malloc(sizeof(ZoneData) * globBuffer.gl_pathc);
+
+    for(int i = 0;i < globBuffer.gl_pathc;i++)
+    {
+        data[i].root = json_object_from_file(globBuffer.gl_pathv[i]);
+        json_object *name = json_object_object_get(data->root,"origin");
+        data[i].name = (char*)json_object_get_string(name);
+
+    }
+    *size = globBuffer.gl_pathc;
+    return data;
+ }
+
+ ZoneData getZone(DomainName* domainName)
+ {
+    int count = 0;
+    ZoneData *zones = loadZones(&count);
+    ZoneData zone = {};
+
+    if(zones != NULL)
+    {
+        for(int i = 0;i < count;i++)
+        {
+            char name[SIZE_OF_DOMAIN_SECOND_LEVEL + SIZE_OF_DOMAIN_TOP_LEVEL];
+
+            strcat(name,(const char*)domainName->secondLevel);
+            strcat(name,".");
+            strcat(name,(const char*)domainName->topLevel);
+
+            if(strcmp(zones[i].name,name) == 0)
+            {
+                zone = zones[i];
+                free(zones);
+                return zone;
+            }
+        }
+    }
+
+    free(zones);
+    return zone;
 
  }
 
@@ -112,19 +162,48 @@ DomainName getQuestionDomain(const u8* data,int readedBytes)
     return domainName;
 }
 
-static DNSHeader buildResponse(const u8* data,int readedBytes)
+DNSHeader buildResponse(const u8* data,int readedBytes)
 {
     DNSHeader header;
 
     u8 transactionID[2];
     transactionID[0] = data[0];
     transactionID[1] = data[1];
-
     header.id = (transactionID[1] << 8) + transactionID[0];
 
-    header.qcount = 1;
+    setFlags(data, &header);
 
-    getQuestionDomain(data + DOMAIN_START,readedBytes);
+
+    u8 bytes[2];
+    bytes[0] = '\x00';
+    bytes[1] = '\x01';
+    header.qcount = (bytes[1] << 8) + bytes[0];;
+
+    char *qt;
+    DomainName name = getQuestionDomain(data + DOMAIN_START,readedBytes);
+
+    if(name.type[0] == '\x00' && name.type[1] == '\x01')
+    {
+        qt = "a";
+    }
+
+    ZoneData zone = getZone(&name);
+
+    if(zone.root != NULL)
+    {
+        json_object* object = json_object_object_get(zone.root,qt);
+        if(object!= NULL)
+        {
+            header.ancount = json_object_array_length(object);
+        }
+    }
+    else
+    {
+        header.ancount = 0;
+    }
+
+    header.nscount = 0;
+    header.adcount = 0;
 
     return header;
 
@@ -134,15 +213,12 @@ static DNSHeader buildResponse(const u8* data,int readedBytes)
 {
     WorkerArgs  *workerArgs = (WorkerArgs*)arg;
     printf("Send to client\n");
-    buildResponse(workerArgs->buffer,workerArgs->readedBytes);
-    // Respond to client:
-    //strcpy(server_message, client_message);
+    DNSHeader header = buildResponse(workerArgs->buffer,workerArgs->readedBytes);
 
-    //if (sendto(socket_desc, server_message, strlen(server_message), 0,
-    //         (struct sockaddr*)&client_addr, client_struct_length) < 0){
-    //printf("Can't send\n");
-    //return -1;
-    //}
+    if (sendto(workerArgs->socketDescriptor, &header, sizeof(DNSHeader), 0,workerArgs->clientAddress, workerArgs->clientStructLength) < 0)
+    {
+        printf("Can't send!The last error message is: %s\n", strerror(errno));
+    }
 }
 
 struct DNSServer
@@ -251,5 +327,7 @@ _Noreturn void serve(DNSServer* server)
 
         }
     }
+
+
 }
 
