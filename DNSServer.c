@@ -12,6 +12,7 @@
 #include <assert.h>
 #include <json.h>
 #include <errno.h>
+#include <bits/unistd_ext.h>
 
 typedef uint8_t u8;
 typedef uint16_t u16;
@@ -39,21 +40,14 @@ typedef struct
 
 typedef struct
 {
-    char *name;
+    u8 name[SIZE_OF_DOMAIN_SECOND_LEVEL + SIZE_OF_DOMAIN_TOP_LEVEL];
     json_object *root;
 }ZoneData;
 
 typedef struct
 {
     u16 id;
-    u16 qr:1;
-	u16 opcode:4;
-	u16 aa:1;
-	u16 tc:1;
-	u16 rd:1;
-	u16 ra:1;
-	u16 zero:3;
-	u16 rcode:4;
+    u16 flags;
     u16 qcount;	/* question count */
     u16 ancount;	/* Answer record count */
     u16 nscount;	/* Name Server (Autority Record) Count */
@@ -62,27 +56,27 @@ typedef struct
 
 typedef struct
 {
-    u8 size1;
-    u8 *name1;
-    u8 size2;
-    u8 *name2;
-    u8 type[SIZE_OF_DOMAIN_TYPE];
+    u8 *name;
+    u16 type;
+    u16 class;
+    u32 nameSize;
 }DNSQuery;
 
 typedef struct
 {
-    u8 compression[2];
-    u8 type[SIZE_OF_DOMAIN_TYPE];
+    u16 name;
+    u16 type;
+    u16 class;
     u32 ttl;
     u16 length;
-    u8 *data;
+    u32 data;
 }DNSBody;
 
 typedef struct
 {
     DNSHeader header;
     DNSQuery query;
-    DNSBody *body;
+    DNSBody body;
 }DNSResponse;
 
 
@@ -95,21 +89,6 @@ struct WorkerArgs
     int clientStructLength;
 };
 
-void setFlags(const u8* data,DNSHeader *header)
-{
-    u8 byte1 = data[2];
-    u8 byte2 = data[3];
-
-    header->qr = 0b1;
-    header->opcode = 0b0;
-    header->aa = 0b1;
-    header->tc = 0b0;
-    header->rd = 0b0;
-    header->ra = 0b0;
-    header->zero = 0b000;
-    header->rcode = 0b0000;
-
-}
 ZoneData *loadZones(int *size)
  {
     glob_t globBuffer;
@@ -125,33 +104,38 @@ ZoneData *loadZones(int *size)
     }
 
     ZoneData *data = (ZoneData*)malloc(sizeof(ZoneData) * globBuffer.gl_pathc);
-
     for(int i = 0;i < globBuffer.gl_pathc;i++)
     {
         data[i].root = json_object_from_file(globBuffer.gl_pathv[i]);
         json_object *name = json_object_object_get(data->root,"origin");
-        data[i].name = (char*)json_object_get_string(name);
+
+        memset(data[i].name,'\0', SIZE_OF_DOMAIN_SECOND_LEVEL + SIZE_OF_DOMAIN_TOP_LEVEL);
+        memcpy(data[i].name,(u8*)json_object_get_string(name),SIZE_OF_DOMAIN_SECOND_LEVEL + SIZE_OF_DOMAIN_TOP_LEVEL);
 
     }
     *size = globBuffer.gl_pathc;
     return data;
  }
 
+
  ZoneData getZone(DomainName* domainName)
  {
     int count = 0;
     ZoneData *zones = loadZones(&count);
     ZoneData zone = {};
+    u8 name[SIZE_OF_DOMAIN_SECOND_LEVEL + SIZE_OF_DOMAIN_TOP_LEVEL];
+    memset(name,'\0', SIZE_OF_DOMAIN_SECOND_LEVEL + SIZE_OF_DOMAIN_TOP_LEVEL);
+
+    strcat((char*)name,(char*)domainName->secondLevel);
+
+    name[strlen(((char*)domainName->secondLevel))] = '.';
+
+    strcat((char*)name,(char*)domainName->topLevel);
 
     if(zones != NULL)
     {
         for(int i = 0;i < count;i++)
         {
-            char name[SIZE_OF_DOMAIN_SECOND_LEVEL + SIZE_OF_DOMAIN_TOP_LEVEL];
-
-            strcat(name,(const char*)domainName->secondLevel);
-            strcat(name,".");
-            strcat(name,(const char*)domainName->topLevel);
 
             if(strcmp(zones[i].name,name) == 0)
             {
@@ -161,7 +145,6 @@ ZoneData *loadZones(int *size)
             }
         }
     }
-
     free(zones);
     return zone;
 
@@ -175,7 +158,7 @@ DomainName getQuestionDomain(const u8* data,int readedBytes)
     u8 topLevelLength = data[secondLevelLength + 1];
 
     memcpy(domainName.secondLevel,data + 1,secondLevelLength);
-    memcpy(domainName.topLevel,data + secondLevelLength + 1 ,topLevelLength + 1);
+    memcpy(domainName.topLevel,data + secondLevelLength + 2 ,topLevelLength + 1);
     memcpy(domainName.type,data + 1 + topLevelLength + secondLevelLength + 2  ,SIZE_OF_DOMAIN_TYPE);
 
     printf("%s.%s Type: %X , %X\n",domainName.secondLevel,domainName.topLevel,domainName.type[0],domainName.type[1]);
@@ -186,20 +169,10 @@ DomainName getQuestionDomain(const u8* data,int readedBytes)
 DNSHeader buildDNSHeader(const u8* data,DomainName *name)
 {
     DNSHeader header;
-    u8 transactionID[2];
-    transactionID[0] = data[0];
-    transactionID[1] = data[1];
-    header.id = (transactionID[1] << 8) + transactionID[0];
-
-    setFlags(data, &header);
-
-    u8 bytes[2];
-    bytes[0] = '\x00';
-    bytes[1] = '\x01';
-    header.qcount = (bytes[1] << 8) + bytes[0];;
-
+    header.id = (data[1] << 8) + data[0] ;
+    header.flags = htons(0x8180);
+    header.qcount = htons(1);
     char *qt;
-
     if(name->type[0] == '\x00' && name->type[1] == '\x01')
     {
         qt = "a";
@@ -207,30 +180,18 @@ DNSHeader buildDNSHeader(const u8* data,DomainName *name)
 
     ZoneData zone = getZone(name);
 
-    if(zone.root != NULL)
-    {
-        json_object* object = json_object_object_get(zone.root,qt);
-        if(object!= NULL)
-        {
-            header.ancount = json_object_array_length(object);
-        }
-    }
-    else
-    {
-        header.ancount = 0;
-    }
-
-    header.nscount = 0;
-    header.adcount = 0;
+    header.ancount = htons(1);
+    header.nscount = htons(0);
+    header.adcount = htons(0);
 
     return header;
 }
 
 
-DNSBody *buildDNSBody(DomainName *name,DNSHeader *header)
+DNSBody buildDNSBody(DomainName *name,DNSHeader *header)
 {
     ZoneData zone = getZone(name);
-    DNSBody *body = (DNSBody*)malloc(sizeof(DNSBody) * header->ancount);
+    DNSBody body;
 
     char *qt;
     if (name->type[0] == '\x00' && name->type[1] == '\x01')
@@ -239,38 +200,20 @@ DNSBody *buildDNSBody(DomainName *name,DNSHeader *header)
     }
 
     json_object* object = json_object_object_get(zone.root,qt);
-    for (int i = 0; i < header->ancount; ++i)
-    {
 
-        body[i].compression[0] = '\xc0';
-        body[i].compression[1] = '\x0c';
-        memcpy(body[i].type,name->type,SIZE_OF_DOMAIN_TYPE);
+    body.name = htons(0xC00C);
+    body.type = htons(1);
+    body.class = htons(1);
 
+    json_object *ttlObject = json_object_object_get(object, "ttl");
+    body.ttl = htonl(json_object_get_int(ttlObject));
 
-        json_object* arrayElement = json_object_array_get_idx(object, i);
+    body.length = htons(sizeof(body.data));
 
-        json_object* ttlObject = json_object_object_get(arrayElement,"ttl");
-        body[i].ttl = json_object_get_int(ttlObject);
-
-        json_object* addressObject = json_object_object_get(arrayElement,"value");
-        const char* address = json_object_get_string(addressObject);
-
-        if(strcmp(qt,"a") == 0)
-        {
-            body[i].length = 4;
-        }
-
-        body[i].data = (u8*) malloc(sizeof(u8) * body[i].length);
-
-        char *token = strtok((char*)address, ".");
-        int j = 0;
-        while(token != NULL )
-        {
-            body[i].data[j] = (u8)atoi(token);
-            j++;
-            token = strtok(NULL, ".");
-        }
-    }
+    json_object *addressObject = json_object_object_get(object, "value");
+    char* address = (char*)json_object_get_string(addressObject);
+    printf("Address: %s \n", address);
+    body.data = inet_addr(address);
 
     return body;
 }
@@ -278,12 +221,21 @@ DNSBody *buildDNSBody(DomainName *name,DNSHeader *header)
 DNSQuery buildDNSQuery(DomainName *name)
 {
     DNSQuery query;
-    memcpy(query.type , name->type,SIZE_OF_DOMAIN_TYPE);
-    query.size1 = strlen((const char*)name->topLevel);
-    query.size2 = strlen((const char*)name->secondLevel);
+    u8 secondLevelLength = strlen(name->secondLevel);
+    u8 topLevelLength = strlen(name->topLevel);
+    query.nameSize = secondLevelLength + topLevelLength + 2;
 
-    query.name1 = name->topLevel;
-    query.name2 = name->secondLevel;
+    memset(query.name,'\0', query.nameSize);
+
+    query.name[0] = secondLevelLength;
+    memcpy(query.name + 1, name->secondLevel,secondLevelLength);
+
+    query.name[secondLevelLength + 1] = topLevelLength;
+    memcpy(query.name + secondLevelLength + 2, name->topLevel,topLevelLength);
+    query.name[secondLevelLength + 2 + topLevelLength] = '\x00';
+
+    query.type = 1;
+    query.class = 1;
 
     return query;
 
@@ -305,19 +257,28 @@ DNSResponse buildResponse(const u8* data,int readedBytes)
  void worker(void *arg)
 {
     WorkerArgs  *workerArgs = (WorkerArgs*)arg;
-    printf("Send to client\n");
-    DNSResponse response = buildResponse(workerArgs->buffer,workerArgs->readedBytes);
 
-    if (sendto(workerArgs->socketDescriptor, &response, sizeof(DNSResponse), 0,workerArgs->clientAddress, workerArgs->clientStructLength) < 0)
+    printf("Send to client\n");
+
+    DNSResponse response = buildResponse(workerArgs->buffer,workerArgs->readedBytes);
+    DNSHeader header = response.header;
+    DNSQuery query = response.query;
+    DNSBody body = response.body;
+
+    char buffer[BUFFER_SIZE];
+    u32 responseSize = sizeof(header)  + (sizeof(u8) * query.nameSize) + (sizeof(u16) * 2) + sizeof(body);
+
+    memcpy(buffer,&header,sizeof(header));
+    memcpy(buffer + sizeof(header),query.name,sizeof(u8) * query.nameSize);
+    memcpy(buffer + sizeof(header) + sizeof(u8) * query.nameSize,&query.type,sizeof(u16));
+    memcpy(buffer + sizeof(header) + sizeof(u8) * query.nameSize + sizeof(u16),&query.class,sizeof(u16));
+    memcpy(buffer + sizeof(header) + sizeof(u8) * query.nameSize + sizeof(u16) * 2,&body,sizeof(body));
+
+    if (sendto(workerArgs->socketDescriptor, buffer, responseSize, 0,workerArgs->clientAddress, workerArgs->clientStructLength) < 0)
     {
         printf("Can't send!The last error message is: %s\n", strerror(errno));
     }
-    for(int i = 0 ;i < response.header.ancount;i++)
-    {
-        free(response.body[i].data);
-    }
 
-    free(response.body);
 }
 
 struct DNSServer
