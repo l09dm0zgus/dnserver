@@ -21,6 +21,8 @@ typedef uint64_t u64;
 
 enum
 {
+    NOT_FOUND = -1,
+    IN_BLACKLIST = 1,
     SIZE_OF_DOMAIN_TYPE = 2,
     DOMAIN_START = 12,
     PORT = 53,
@@ -64,7 +66,6 @@ typedef struct
 
 typedef struct
 {
-    u16 name;
     u16 type;
     u16 class;
     u32 ttl;
@@ -201,7 +202,6 @@ DNSBody buildDNSBody(DomainName *name,DNSHeader *header)
 
     json_object* object = json_object_object_get(zone.root,qt);
 
-    body.name = htons(0xC00C);
     body.type = htons(1);
     body.class = htons(1);
 
@@ -213,7 +213,7 @@ DNSBody buildDNSBody(DomainName *name,DNSHeader *header)
     json_object *addressObject = json_object_object_get(object, "value");
     char* address = (char*)json_object_get_string(addressObject);
     printf("Address: %s \n", address);
-    body.data = inet_addr(address);
+    body.data = htons(inet_addr(address));
 
     return body;
 }
@@ -223,7 +223,7 @@ DNSQuery buildDNSQuery(DomainName *name)
     DNSQuery query;
     u8 secondLevelLength = strlen(name->secondLevel);
     u8 topLevelLength = strlen(name->topLevel);
-    query.nameSize = secondLevelLength + topLevelLength + 2;
+    query.nameSize = secondLevelLength + topLevelLength + 3;
 
     memset(query.name,'\0', query.nameSize);
 
@@ -232,7 +232,6 @@ DNSQuery buildDNSQuery(DomainName *name)
 
     query.name[secondLevelLength + 1] = topLevelLength;
     memcpy(query.name + secondLevelLength + 2, name->topLevel,topLevelLength);
-    query.name[secondLevelLength + 2 + topLevelLength] = '\x00';
 
     query.type = 1;
     query.class = 1;
@@ -241,38 +240,35 @@ DNSQuery buildDNSQuery(DomainName *name)
 
 }
 
-DNSResponse buildResponse(const u8* data,int readedBytes)
+u32 buildResponse(const u8* queryBuffer,u8* bufferResponse,int readedBytes)
 {
     DNSResponse response;
 
-    DomainName name = getQuestionDomain(data + DOMAIN_START,readedBytes);
+    DomainName name = getQuestionDomain(queryBuffer + DOMAIN_START,readedBytes);
 
-    response.header = buildDNSHeader(data,&name);
-    response.query = buildDNSQuery(&name);
-    response.body = buildDNSBody(&name,&response.header);
+    DNSHeader header = buildDNSHeader(queryBuffer,&name);;
+    DNSQuery query = buildDNSQuery(&name);
+    DNSBody body = buildDNSBody(&name,&response.header);
 
-    return response;
+    u32 responseSize = sizeof(header)  + (sizeof(u8) * query.nameSize * 2) + (sizeof(u16) * 2) + sizeof(body);
+
+    memcpy(bufferResponse,&header,sizeof(header));
+    memcpy(bufferResponse + sizeof(header),query.name,sizeof(u8) * query.nameSize);
+    memcpy(bufferResponse + sizeof(header) + sizeof(u8) * query.nameSize + 1,&query.type,sizeof(u16));
+    memcpy(bufferResponse + sizeof(header) + sizeof(u8) * query.nameSize + 1 + sizeof(u16),&query.class,sizeof(u16));
+    memcpy(bufferResponse + sizeof(header) + sizeof(u8) * query.nameSize + sizeof(u16) * 2 ,query.name, sizeof(u8) * query.nameSize);
+    memcpy(bufferResponse + sizeof(header) + sizeof(u8) * query.nameSize  + sizeof(u16) * 2 + sizeof(u8) * query.nameSize,&body,sizeof(body));
+
+    return responseSize;
 }
 
  void worker(void *arg)
 {
     WorkerArgs  *workerArgs = (WorkerArgs*)arg;
-
     printf("Send to client\n");
 
-    DNSResponse response = buildResponse(workerArgs->buffer,workerArgs->readedBytes);
-    DNSHeader header = response.header;
-    DNSQuery query = response.query;
-    DNSBody body = response.body;
-
     char buffer[BUFFER_SIZE];
-    u32 responseSize = sizeof(header)  + (sizeof(u8) * query.nameSize) + (sizeof(u16) * 2) + sizeof(body);
-
-    memcpy(buffer,&header,sizeof(header));
-    memcpy(buffer + sizeof(header),query.name,sizeof(u8) * query.nameSize);
-    memcpy(buffer + sizeof(header) + sizeof(u8) * query.nameSize,&query.type,sizeof(u16));
-    memcpy(buffer + sizeof(header) + sizeof(u8) * query.nameSize + sizeof(u16),&query.class,sizeof(u16));
-    memcpy(buffer + sizeof(header) + sizeof(u8) * query.nameSize + sizeof(u16) * 2,&body,sizeof(body));
+    u32 responseSize = buildResponse(workerArgs->buffer,buffer,workerArgs->readedBytes);
 
     if (sendto(workerArgs->socketDescriptor, buffer, responseSize, 0,workerArgs->clientAddress, workerArgs->clientStructLength) < 0)
     {
