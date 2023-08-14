@@ -42,6 +42,7 @@ typedef struct
 
 typedef struct
 {
+    int type;
     u8 name[SIZE_OF_DOMAIN_SECOND_LEVEL + SIZE_OF_DOMAIN_TOP_LEVEL];
     json_object *root;
 }ZoneData;
@@ -58,7 +59,7 @@ typedef struct
 
 typedef struct
 {
-    u8 *name;
+    u8 name[SIZE_OF_DOMAIN_TOP_LEVEL + SIZE_OF_DOMAIN_SECOND_LEVEL];
     u16 type;
     u16 class;
     u32 nameSize;
@@ -90,6 +91,23 @@ struct WorkerArgs
     int clientStructLength;
 };
 
+u8* domainNameToString(DomainName *domainName)
+{
+    u8* name = (u8*) malloc(sizeof (u8) * SIZE_OF_DOMAIN_SECOND_LEVEL + SIZE_OF_DOMAIN_TOP_LEVEL);
+    memset(name,'\0', SIZE_OF_DOMAIN_SECOND_LEVEL + SIZE_OF_DOMAIN_TOP_LEVEL);
+
+    strcat((char*)name,(char*)domainName->secondLevel);
+
+    if(strcmp(domainName->secondLevel,"localhost") != 0)
+    {
+        name[strlen(((char*)domainName->secondLevel))] = '.';
+
+        strcat((char*)name,(char*)domainName->topLevel);
+    }
+
+    return name;
+}
+
 ZoneData *loadZones(int *size)
  {
     glob_t globBuffer;
@@ -108,11 +126,9 @@ ZoneData *loadZones(int *size)
     for(int i = 0;i < globBuffer.gl_pathc;i++)
     {
         data[i].root = json_object_from_file(globBuffer.gl_pathv[i]);
-        json_object *name = json_object_object_get(data->root,"origin");
-
+        json_object *name = json_object_object_get(data[i].root,"origin");
         memset(data[i].name,'\0', SIZE_OF_DOMAIN_SECOND_LEVEL + SIZE_OF_DOMAIN_TOP_LEVEL);
         memcpy(data[i].name,(u8*)json_object_get_string(name),SIZE_OF_DOMAIN_SECOND_LEVEL + SIZE_OF_DOMAIN_TOP_LEVEL);
-
     }
     *size = globBuffer.gl_pathc;
     return data;
@@ -124,31 +140,85 @@ ZoneData *loadZones(int *size)
     int count = 0;
     ZoneData *zones = loadZones(&count);
     ZoneData zone = {};
-    u8 name[SIZE_OF_DOMAIN_SECOND_LEVEL + SIZE_OF_DOMAIN_TOP_LEVEL];
-    memset(name,'\0', SIZE_OF_DOMAIN_SECOND_LEVEL + SIZE_OF_DOMAIN_TOP_LEVEL);
+    zone.type = NOT_FOUND;
 
-    strcat((char*)name,(char*)domainName->secondLevel);
-
-    name[strlen(((char*)domainName->secondLevel))] = '.';
-
-    strcat((char*)name,(char*)domainName->topLevel);
+    u8 *name = domainNameToString(domainName);
+    printf("Name: %s\n",name);
 
     if(zones != NULL)
     {
         for(int i = 0;i < count;i++)
         {
-
             if(strcmp(zones[i].name,name) == 0)
             {
                 zone = zones[i];
+                zone.type = 0;
                 free(zones);
+                free(name);
                 return zone;
             }
         }
     }
+    free(name);
     free(zones);
     return zone;
 
+ }
+
+
+
+ int isDomainBlacklisted(DomainName* domainName)
+ {
+    u8 *name = domainNameToString(domainName);
+
+     FILE *file;
+     char *line = NULL;
+     size_t length = 0;
+     ssize_t read;
+
+     file = fopen("zones/blacklist", "r");
+     if (file == NULL)
+     {
+         printf("Failed to open blacklist file!\n");
+         exit(EXIT_FAILURE);
+     }
+
+     while ((read = getline(&line, &length, file)) != -1)
+     {
+
+         for (int i = 0; i < strlen(line); ++i)
+         {
+             if (line[i] == '\n')
+             {
+                 line[i] = '\0';
+                 break;
+             }
+         }
+
+         if(strcmp(line,name) == 0)
+         {
+             free(name);
+             fclose(file);
+             return IN_BLACKLIST;
+         }
+     }
+
+     free(name);
+     fclose(file);
+     return 0;
+ }
+
+ int isZoneExist(DomainName* name)
+ {
+    ZoneData  zoneData = getZone(name);
+    if(zoneData.type == NOT_FOUND)
+    {
+        return 0;
+    }
+    else
+    {
+        return 1;
+    }
  }
 
 DomainName getQuestionDomain(const u8* data,int readedBytes)
@@ -167,19 +237,12 @@ DomainName getQuestionDomain(const u8* data,int readedBytes)
     return domainName;
 }
 
-DNSHeader buildDNSHeader(const u8* data,DomainName *name)
+DNSHeader buildDNSHeader(const u8* data)
 {
     DNSHeader header;
     header.id = (data[1] << 8) + data[0] ;
     header.flags = htons(0x8180);
     header.qcount = htons(1);
-    char *qt;
-    if(name->type[0] == '\x00' && name->type[1] == '\x01')
-    {
-        qt = "a";
-    }
-
-    ZoneData zone = getZone(name);
 
     header.ancount = htons(1);
     header.nscount = htons(0);
@@ -212,9 +275,8 @@ DNSBody buildDNSBody(DomainName *name,DNSHeader *header)
 
     json_object *addressObject = json_object_object_get(object, "value");
     char* address = (char*)json_object_get_string(addressObject);
-    printf("Address: %s \n", address);
-    body.data = htons(inet_addr(address));
 
+    body.data = htons(inet_addr(address));
     return body;
 }
 
@@ -223,15 +285,25 @@ DNSQuery buildDNSQuery(DomainName *name)
     DNSQuery query;
     u8 secondLevelLength = strlen(name->secondLevel);
     u8 topLevelLength = strlen(name->topLevel);
-    query.nameSize = secondLevelLength + topLevelLength + 3;
 
+    query.nameSize = secondLevelLength + topLevelLength + 3;
     memset(query.name,'\0', query.nameSize);
 
     query.name[0] = secondLevelLength;
     memcpy(query.name + 1, name->secondLevel,secondLevelLength);
 
-    query.name[secondLevelLength + 1] = topLevelLength;
-    memcpy(query.name + secondLevelLength + 2, name->topLevel,topLevelLength);
+    if(strcmp(name->secondLevel,"localhost") ==0)
+    {
+        query.name[secondLevelLength + 1] = 0;
+        query.name[secondLevelLength + 2] = 0;
+        query.nameSize = secondLevelLength + 2;
+
+    }
+    else
+    {
+        query.name[secondLevelLength + 1] = topLevelLength;
+        memcpy(query.name + secondLevelLength + 2, name->topLevel,topLevelLength);
+    }
 
     query.type = 1;
     query.class = 1;
@@ -240,24 +312,51 @@ DNSQuery buildDNSQuery(DomainName *name)
 
 }
 
+u32 setResponseBuffer(u8* bufferResponse,DNSHeader *header,DNSQuery *query,DNSBody *body)
+
+{
+    u32 responseSize =  sizeof(DNSHeader)  + (sizeof(u8) * query->nameSize * 2) + (sizeof(u16) * 2) + sizeof(DNSBody);
+    memcpy(bufferResponse,header,sizeof(DNSHeader));
+    memcpy(bufferResponse + sizeof(DNSHeader),query->name,sizeof(u8) * query->nameSize);
+    memcpy(bufferResponse + sizeof(DNSHeader) + sizeof(u8) * query->nameSize + 1,&query->type,sizeof(u16));
+    memcpy(bufferResponse + sizeof(DNSHeader) + sizeof(u8) * query->nameSize + 1 + sizeof(u16),&query->class,sizeof(u16));
+    memcpy(bufferResponse + sizeof(DNSHeader) + sizeof(u8) * query->nameSize + sizeof(u16) * 2 ,query->name, sizeof(u8) * query->nameSize);
+    memcpy(bufferResponse + sizeof(DNSHeader) + sizeof(u8) * query->nameSize  + sizeof(u16) * 2 + sizeof(u8) * query->nameSize,body,sizeof(DNSBody));
+
+    return responseSize;
+
+}
+
 u32 buildResponse(const u8* queryBuffer,u8* bufferResponse,int readedBytes)
 {
     DNSResponse response;
-
     DomainName name = getQuestionDomain(queryBuffer + DOMAIN_START,readedBytes);
+    u32 responseSize = 0;
+    if(isDomainBlacklisted(&name))
+    {
+        u8 *localhost = "localhost";
+        memcpy(name.secondLevel,localhost, strlen(localhost));
+        memset(name.topLevel,'\0', SIZE_OF_DOMAIN_TOP_LEVEL);
 
-    DNSHeader header = buildDNSHeader(queryBuffer,&name);;
-    DNSQuery query = buildDNSQuery(&name);
-    DNSBody body = buildDNSBody(&name,&response.header);
+        DNSHeader header = buildDNSHeader(queryBuffer);;
+        DNSQuery query = buildDNSQuery(&name);
+        DNSBody body = buildDNSBody(&name,&response.header);
+        responseSize = setResponseBuffer(bufferResponse,&header,&query,&body);
 
-    u32 responseSize = sizeof(header)  + (sizeof(u8) * query.nameSize * 2) + (sizeof(u16) * 2) + sizeof(body);
+    }
+    else if(isZoneExist(&name))
+    {
+        DNSHeader header = buildDNSHeader(queryBuffer);;
+        DNSQuery query = buildDNSQuery(&name);
+        DNSBody body = buildDNSBody(&name,&response.header);
+        responseSize = setResponseBuffer(bufferResponse,&header,&query,&body);
+    }
+    else
+    {
 
-    memcpy(bufferResponse,&header,sizeof(header));
-    memcpy(bufferResponse + sizeof(header),query.name,sizeof(u8) * query.nameSize);
-    memcpy(bufferResponse + sizeof(header) + sizeof(u8) * query.nameSize + 1,&query.type,sizeof(u16));
-    memcpy(bufferResponse + sizeof(header) + sizeof(u8) * query.nameSize + 1 + sizeof(u16),&query.class,sizeof(u16));
-    memcpy(bufferResponse + sizeof(header) + sizeof(u8) * query.nameSize + sizeof(u16) * 2 ,query.name, sizeof(u8) * query.nameSize);
-    memcpy(bufferResponse + sizeof(header) + sizeof(u8) * query.nameSize  + sizeof(u16) * 2 + sizeof(u8) * query.nameSize,&body,sizeof(body));
+    }
+
+
 
     return responseSize;
 }
