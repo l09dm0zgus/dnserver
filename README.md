@@ -2,6 +2,10 @@
 
 Simple DNS server written in C.
 
+Based on this [videos](https://www.youtube.com/watch?v=HdrPWGZ3NRo&list=PLBOh8f9FoHHhvO5e5HF_6mYvtZegobYX2&index=1)
+
+Implementation of Thread Pool in C - https://nachtimwald.com/2019/04/12/thread-pool-in-c/
+
 ## Dependencies
 * POSIX Threads
 * POSIX Sockets
@@ -31,4 +35,4 @@ Change origin to your domain , value to address.
 
 For adding a domain to block list,add a domain to end of file blacklist , and change address to redirect in noresolved.zone.
 
-
+For redirecting DNS client  to another server set port and ip address in file redirect.conf(default ip : 8.8.8.8 , port : 53) .
