@@ -143,8 +143,6 @@ ZoneData *loadZones(int *size)
     zone.type = NOT_FOUND;
 
     u8 *name = domainNameToString(domainName);
-    printf("Name: %s\n",name);
-
     if(zones != NULL)
     {
         for(int i = 0;i < count;i++)
@@ -312,10 +310,10 @@ DNSQuery buildDNSQuery(DomainName *name)
 
 }
 
-u32 setResponseBuffer(u8* bufferResponse,DNSHeader *header,DNSQuery *query,DNSBody *body)
+int setResponseBuffer(u8* bufferResponse,DNSHeader *header,DNSQuery *query,DNSBody *body)
 
 {
-    u32 responseSize =  sizeof(DNSHeader)  + (sizeof(u8) * query->nameSize * 2) + (sizeof(u16) * 2) + sizeof(DNSBody);
+    int responseSize =  sizeof(DNSHeader)  + (sizeof(u8) * query->nameSize * 2) + (sizeof(u16) * 2) + sizeof(DNSBody);
     memcpy(bufferResponse,header,sizeof(DNSHeader));
     memcpy(bufferResponse + sizeof(DNSHeader),query->name,sizeof(u8) * query->nameSize);
     memcpy(bufferResponse + sizeof(DNSHeader) + sizeof(u8) * query->nameSize + 1,&query->type,sizeof(u16));
@@ -327,11 +325,58 @@ u32 setResponseBuffer(u8* bufferResponse,DNSHeader *header,DNSQuery *query,DNSBo
 
 }
 
-u32 buildResponse(const u8* queryBuffer,u8* bufferResponse,int readedBytes)
+int redirectToUpperDNSName(const u8* readedBuffer,int readedBytesNumber,u8 *responeBuffer)
+{
+    json_object* config = json_object_from_file("zones/redirect.conf");
+    int readedBytes = 0;
+    if(config != NULL)
+    {
+        json_object* ipObject = json_object_object_get(config,"ip");
+        json_object* portObject = json_object_object_get(config,"port");
+        const char* ip = json_object_get_string(ipObject);
+        int portNumber = json_object_get_int(portObject);
+
+        struct sockaddr_in serverAddress;
+        int socketDescriptor;
+
+        if((socketDescriptor = socket(AF_INET,SOCK_DGRAM,0)) < 0)
+        {
+            printf("Socket creation failed...\n");
+            exit(EXIT_FAILURE);
+        }
+
+        serverAddress.sin_family = AF_INET;
+        serverAddress.sin_port  = htons(portNumber);
+        serverAddress.sin_addr.s_addr = inet_addr(ip);
+
+        if(sendto(socketDescriptor,readedBuffer,readedBytesNumber,0,(struct sockaddr*)&serverAddress,sizeof(serverAddress))  < 0)
+        {
+            printf("sendto failed...\n");
+            exit(EXIT_FAILURE);
+        }
+
+        size_t serverAddressSize = sizeof(serverAddress);
+        readedBytes = recvfrom(socketDescriptor,responeBuffer,BUFFER_SIZE,0,(struct sockaddr*)&serverAddress,&serverAddressSize);
+        if(readedBytes < 0)
+        {
+            printf("sendto failed...\n");
+            exit(EXIT_FAILURE);
+        }
+
+    }
+    else
+    {
+        printf("Failed to open file zones/redirect.conf\n Please create file or set permissions to file!\n");
+        exit(-1);
+    }
+    return readedBytes;
+}
+
+int buildResponse(const u8* queryBuffer,u8* bufferResponse,int readedBytes)
 {
     DNSResponse response;
     DomainName name = getQuestionDomain(queryBuffer + DOMAIN_START,readedBytes);
-    u32 responseSize = 0;
+    int responseSize = 0;
     if(isDomainBlacklisted(&name))
     {
         u8 *localhost = "localhost";
@@ -353,7 +398,7 @@ u32 buildResponse(const u8* queryBuffer,u8* bufferResponse,int readedBytes)
     }
     else
     {
-
+        responseSize = redirectToUpperDNSName(queryBuffer,readedBytes,bufferResponse);
     }
 
 
@@ -460,8 +505,6 @@ _Noreturn void serve(DNSServer* server)
             if(readedBytes > 0)
             {
                 printf("Received message from IP: %s and port: %i\n", inet_ntoa(clientAddress.sin_addr), ntohs(clientAddress.sin_port));
-
-                printf("Msg from client: %s\n", server->clientMessage);
                 if(server->pool != NULL)
                 {
                     WorkerArgs args;
@@ -477,8 +520,6 @@ _Noreturn void serve(DNSServer* server)
                     addWork(server->pool,worker,&args);
                 }
             }
-
-
 
         }
     }
